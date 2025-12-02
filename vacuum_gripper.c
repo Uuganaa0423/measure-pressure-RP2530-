@@ -215,10 +215,10 @@ float convert_to_pascal(int32_t raw_value)
  */
 void monitor_pressure(void)
 {
-    if (!trigger_measurement(50)) {
-        printf("Measurement trigger failed\n");
-        return;
-    }
+    // if (!trigger_measurement(50)) {
+    //     printf("Measurement trigger failed\n");
+    //     return;
+    // }
 
     dump_sensor_data_registers();
 
