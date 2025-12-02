@@ -1,4 +1,5 @@
 #include "XGZP6847D.h"
+#include "hardware/gpio.h"
 /**
  * Initialize I2C interface for pressure sensor
  */

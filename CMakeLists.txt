@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(vacuum_gripper vacuum_gripper.c )
+add_executable(vacuum_gripper vacuum_gripper.c XGZP6847D.c)
 
 pico_set_program_name(vacuum_gripper "vacuum_gripper")
 pico_set_program_version(vacuum_gripper "0.1")
@@ -47,7 +47,9 @@ pico_enable_stdio_usb(vacuum_gripper 1)
 # Add the standard library to the build
 target_link_libraries(vacuum_gripper
         pico_stdlib
-        hardware_i2c)
+        hardware_i2c
+        hardware_gpio
+        m)
 
 # Add the standard include files to the build
 target_include_directories(vacuum_gripper PRIVATE
