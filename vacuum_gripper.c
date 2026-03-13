@@ -7,8 +7,10 @@
 #include "XGZP6847D.h"
 
 // L298N Motor Driver Configuration for Vacuum Pump
-#define DIGITAL_INPUT0_PIN 2      // GPIO2: Control signal (LOW -> HIGH starts pump)
-#define DIGITAL_OUTPUT0_PIN 5     // GPIO3: Output signal (HIGH when target pressure reached)
+#define DIGITAL_INPUT0_PIN 2      // GPIO2: DI0 - Direct control for pump (HIGH=ON, LOW=OFF)
+#define DIGITAL_INPUT1_PIN 3      // GPIO3: DI1 - Direct control for vent valve (HIGH=ON, LOW=OFF)
+#define DIGITAL_OUTPUT0_PIN 5     // GPIO5: Alarm signal (HIGH when pressure > -60000 Pa)
+#define DIGITAL_OUTPUT1_PIN 6     // GPIO6: Alarm signal (HIGH when pressure > -60000 Pa)
 #define L298_IN1_PIN       28     // GPIO28: L298N IN1 pin
 #define L298_IN2_PIN       29     // GPIO29: L298N IN2 pin
 #define L298_ENABLE_A_PIN  15     // GPIO15: L298N Enable_A pin (ENA)
@@ -17,12 +19,12 @@
 #define L298_IN3_PIN       11     // GPIO11: L298N IN3 pin (vent valve)
 #define L298_IN4_PIN       12     // GPIO12: L298N IN4 pin (vent valve)
 #define L298_ENABLE_B_PIN  14     // GPIO14: L298N Enable_B pin (ENB)
-// Target pressure level: -60kPa = -57764 Pa /according to measurements/
-// #define TARGET_PRESSURE_PA -57764.0f
-#define TARGET_PRESSURE_PA -70000.0f
+// Alarm threshold: DO0 turns ON when pressure rises above this value
+#define ALARM_PRESSURE_THRESHOLD_PA -60000.0f  // Alarm when pressure > -60000 Pa
 // ============================================================================
 // Vacuum Pump Control Functions (L298N Motor Driver)
 // ============================================================================
+#define RB_ROBOT 1
 
 /**
  * Disable vacuum pump by turning off Enable_A and setting IN1/IN2 to LOW
@@ -65,7 +67,6 @@ static void disable_vent_valve(void)
     gpio_put(L298_IN3_PIN, 0);
     gpio_put(L298_IN4_PIN, 0);
     gpio_put(L298_ENABLE_B_PIN, 0);
-    printf("Vent valve disabled\n");
 }
 
 /**
@@ -73,12 +74,17 @@ static void disable_vent_valve(void)
  */
 static void init_vacuum_control(void)
 {
-    // Configure digital input pin (GPIO2) for control signal
+    // Configure digital input pin DI0 (GPIO2) - Direct control for pump
     gpio_init(DIGITAL_INPUT0_PIN);
     gpio_set_dir(DIGITAL_INPUT0_PIN, GPIO_IN);
     gpio_pull_down(DIGITAL_INPUT0_PIN);
 
-    // Configure digital output pin (GPIO3) for pressure status
+    // Configure digital input pin DI1 (GPIO3) - Direct control for vent valve
+    gpio_init(DIGITAL_INPUT1_PIN);
+    gpio_set_dir(DIGITAL_INPUT1_PIN, GPIO_IN);
+    gpio_pull_down(DIGITAL_INPUT1_PIN);
+
+    // Configure digital output pin (GPIO5) for alarm signal
     gpio_init(DIGITAL_OUTPUT0_PIN);
     gpio_set_dir(DIGITAL_OUTPUT0_PIN, GPIO_OUT);
     gpio_put(DIGITAL_OUTPUT0_PIN, 0);  // Start with LOW
@@ -124,12 +130,13 @@ int main()
     init_vacuum_control();
     
     printf("I2C initialized. Starting pressure monitoring...\n\n");
-
-    // Initialize state tracking for digital input
-    bool prev_input_state = gpio_get(DIGITAL_INPUT0_PIN);
-    if (prev_input_state) {
-        enable_vacuum_pump();
-    }
+    printf("DI0 (GPIO%d): Direct control for pump (HIGH=ON, LOW=OFF)\n", DIGITAL_INPUT0_PIN);
+    printf("DI1 (GPIO%d): Direct control for vent valve (HIGH=ON, LOW=OFF)\n", DIGITAL_INPUT1_PIN);
+    printf("DO0 (GPIO%d): Alarm signal (ON when pump running AND pressure > %.2f Pa)\n", DIGITAL_OUTPUT0_PIN, ALARM_PRESSURE_THRESHOLD_PA);
+    printf("Control Logic:\n");
+    printf("  - Pump: Controlled directly by DI0\n");
+    printf("  - Vent Valve: Controlled directly by DI1\n");
+    printf("  - DO0 Alarm: Evaluated only when pump ON; ON when pressure > %.2f Pa (vacuum lost); OFF when pump OFF\n\n", ALARM_PRESSURE_THRESHOLD_PA);
 
     while (true) {
         // Measure pressure first
@@ -142,48 +149,89 @@ int main()
         int32_t raw_pressure = read_pressure_raw();
         float pressure_pa = convert_to_pascal(raw_pressure);
 
-        // Control digital_output_0 based on target pressure (-65kPa)
-        if (fabs(pressure_pa) >= fabs(TARGET_PRESSURE_PA)) {
-            // Pressure reached or exceeded target level
-            if (!gpio_get(DIGITAL_OUTPUT0_PIN)) {
-                gpio_put(DIGITAL_OUTPUT0_PIN, 1);
-                printf("Target pressure reached: %.2f Pa. digital_output_0 set to HIGH\n", pressure_pa);
+        // Read digital input states
+        bool di0_state = false;
+        bool di1_state = false;
+        if (RB_ROBOT) {
+            di0_state = gpio_get(DIGITAL_INPUT0_PIN);  // Direct control for pump
+            di1_state = gpio_get(DIGITAL_INPUT1_PIN);  // Direct control for vent valve
+        } else {
+            di0_state = gpio_get(DIGITAL_INPUT0_PIN);  // Direct control for pump
+            di1_state = gpio_get(DIGITAL_INPUT1_PIN);  // Direct control for vent valve
 
+            di0_state = !di0_state;  // Invert the state for the robot
+            di1_state = !di1_state;  // Invert the state for the robot
+        }
+
+        // Direct control: Pump controlled by DI0
+        if (di0_state) {
+            // DI0 is HIGH: turn ON pump
+            if (!gpio_get(L298_ENABLE_A_PIN)) {
+                enable_vacuum_pump();
             }
         } else {
-            // Pressure dropped below target level
-            if (gpio_get(DIGITAL_OUTPUT0_PIN)) {
-                gpio_put(DIGITAL_OUTPUT0_PIN, 0);
-                printf("Pressure below target: %.2f Pa. digital_output_0 reset to LOW\n", pressure_pa);
-
+            // DI0 is LOW: turn OFF pump
+            if (gpio_get(L298_ENABLE_A_PIN)) {
+                disable_vacuum_pump();
             }
         }
 
-        // Monitor digital input for vacuum pump control
-        bool input_state = gpio_get(DIGITAL_INPUT0_PIN);
-
-        // Turn on pump when signal goes LOW to HIGH (rising edge)
-        if (input_state && !prev_input_state) {
-            printf("digital_input_0 rising edge detected\n");
-            enable_vacuum_pump();
-        }
-        // Turn off pump and activate vent valve when signal goes HIGH to LOW (falling edge)
-        else if (!input_state && prev_input_state) {
-            printf("digital_input_0 falling edge detected\n");
-            disable_vacuum_pump();
-            
-            // Turn on vent valve for 1 second
-            enable_vent_valve();
-            sleep_ms(1000);
-            disable_vent_valve();
+        // Direct control: Vent valve controlled by DI1
+        if (di1_state) {
+            // DI1 is HIGH: turn ON vent valve
+            if (!gpio_get(L298_ENABLE_B_PIN)) {
+                enable_vent_valve();
+            }
+        } else {
+            // DI1 is LOW: turn OFF vent valve
+            if (gpio_get(L298_ENABLE_B_PIN)) {
+                disable_vent_valve();
+            }
         }
 
-        prev_input_state = input_state;
+        // DO0 alarm: evaluated ONLY when pump is running. If pump OFF, DO0 stays inactive (LOW).
+        // Alarm condition (PNP): pump ON AND pressure above threshold = vacuum lost -> DO0 HIGH.
+        bool pump_running = gpio_get(L298_ENABLE_A_PIN);
+        if (!pump_running) {
+            gpio_put(DIGITAL_OUTPUT0_PIN, 0);
+        } else {
+            if (pressure_pa > ALARM_PRESSURE_THRESHOLD_PA) {
+                if (!gpio_get(DIGITAL_OUTPUT0_PIN)) {
+                    gpio_put(DIGITAL_OUTPUT0_PIN, 1);
+                    printf("ALARM: Pressure %.2f Pa > %.2f Pa. DO0 set to HIGH\n", pressure_pa, ALARM_PRESSURE_THRESHOLD_PA);
+                }
+            } else {
+                if (gpio_get(DIGITAL_OUTPUT0_PIN)) {
+                    gpio_put(DIGITAL_OUTPUT0_PIN, 0);
+                    printf("Pressure %.2f Pa <= %.2f Pa. DO0 reset to LOW\n", pressure_pa, ALARM_PRESSURE_THRESHOLD_PA);
+                }
+            }
+        }
 
         // Display pressure data and status
         bool output0_status = gpio_get(DIGITAL_OUTPUT0_PIN);
-        printf("Pressure - Raw: %d (0x%06X), Pa: %.2f, Target: %.2f Pa, digital_output_0: %s\n",
-                (int)raw_pressure, (unsigned int)(raw_pressure & 0xFFFFFF), pressure_pa, TARGET_PRESSURE_PA,
+        bool pump_status = gpio_get(L298_ENABLE_A_PIN);
+        bool vent_valve_status = gpio_get(L298_ENABLE_B_PIN);
+        
+        // Get timestamp in milliseconds (since boot)
+        uint64_t timestamp_ms = time_us_64() / 1000;
+        
+        // Output CSV line for data capture script (must start with "CSV,")
+        printf("CSV,%llu,%.2f,%d,%d,%d,%d\n",
+                timestamp_ms,
+                pressure_pa,
+                di0_state ? 1 : 0,
+                di1_state ? 1 : 0,
+                pump_status ? 1 : 0,
+                vent_valve_status ? 1 : 0);
+        
+        // Also output human-readable status for debugging
+        printf("Pressure: %.2f Pa | DI0: %s | DI1: %s | Pump: %s | Vent: %s | DO0: %s\n",
+                pressure_pa,
+                di0_state ? "HIGH" : "LOW",
+                di1_state ? "HIGH" : "LOW",
+                pump_status ? "ON" : "OFF",
+                vent_valve_status ? "ON" : "OFF",
                 output0_status ? "HIGH" : "LOW");
         sleep_ms(100);  // Read every 100ms for better responsiveness
     }
